@@ -1,0 +1,6 @@
+{
+  "mongoURI": "mongodb://127.0.0.1:27017/seameo",
+  "jwtSecret": "mysecrettoken",
+  "tokenKey": "mic-auth-token",
+  "tokenLife": 1000000
+}
