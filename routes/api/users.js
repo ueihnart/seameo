@@ -5,16 +5,16 @@ const jwt = require("jsonwebtoken");
 const config = require("config");
 const { check, validationResult } = require("express-validator");
 const User = require("./../../models/User");
-const auth = require("./../../middleware/auth");
 const roles = require("./../../middleware/roles");
+const CONSTANT = require("./../../config/constant");
 
 //@route    post api/user
 //desc      Register user
 //access    Public
 router.post(
-  "/",
+  "/register",
   [
-    roles("update", "user"),
+    roles(CONSTANT.CRUD.CREATE, CONSTANT.TASK.USER),
     [
       (check("fullname", "Full name is not Empty!").notEmpty(),
       check("unit", "Unit is not Empty!").notEmpty(),
@@ -35,10 +35,10 @@ router.post(
     if (!errors.isEmpty()) {
       return res.status(400).json({ errors: errors.array() });
     }
-    const { fullname, unit, username, password } = req.body;
-    let authorities = "user";
-    if (username === "adminseameo") authorities = "admin";
-
+    let { fullname, unit, username, password } = req.body;
+    username = username.toLowerCase();
+    let role = CONSTANT.ROLES.USER;
+    if (username === "adminseameo") role = CONSTANT.ROLES.SPADMIN;
     try {
       //Seee if user exists
       let user = await User.findOne({ username });
@@ -50,17 +50,15 @@ router.post(
         password,
         fullname,
         unit,
-        authorities
+        role
       });
       //Encrypt password
       const salt = await bcrypt.genSalt(10);
       user.password = await bcrypt.hash(password, salt);
-
       await user.save();
-
       //Return jsonwebtoken
       const payload = {
-        user: { username: user.username, authorities: user.authorities }
+        user: { username: user.username, role: user.role }
       };
       jwt.sign(
         payload,
@@ -79,40 +77,101 @@ router.post(
   }
 );
 
-// @route put api/user
+//@route    post api/user/login
+//desc      Authenticate user & get token (Login)
+//access    Public
+router.post(
+  "/login",
+  [
+    (check("username", "Username is required!")
+      .not()
+      .isEmpty(),
+    check("password", "Password is required!").exists())
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    let { username, password } = req.body;
+    username = username.toLowerCase();
+    try {
+      //Seee if user exists
+      let user = await User.findOne({ username });
+      if (!user) {
+        res
+          .status(400)
+          .json({ errors: [{ msg: "Invalid user credentials!" }] });
+      }
+      //check Password is match
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) {
+        return res
+          .status(400)
+          .json({ errors: [{ msg: "Invalid password credentials!" }] });
+      }
+      //Return jsonwebtoken
+      const payload = {
+        user: { username: user.username, role: user.role }
+      };
+      jwt.sign(
+        payload,
+        config.get("jwtSecret"),
+        { algorithm: "HS256", expiresIn: config.get("tokenLife") },
+        (err, token) => {
+          if (err) throw err;
+          res.json({ token });
+        }
+      );
+    } catch (err) {
+      console.error("Error:");
+      console.error(err.message);
+      res.status(500).send("Server Error!");
+    }
+  }
+);
+
+//@route    get api/user/logout
+//desc      Logout (logout)
+//access    Public
+router.get(
+  "/logout",
+  [roles(CONSTANT.CRUD.READ, CONSTANT.TASK.USER)],
+  async (req, res) => {
+    try {
+      //Return jsonwebtoken
+      const payload = {
+        user: {}
+      };
+      jwt.sign(
+        payload,
+        config.get("jwtSecret"),
+        { algorithm: "HS256", expiresIn: 0 },
+        (err, token) => {
+          if (err) throw err;
+          res.json({ token });
+        }
+      );
+    } catch (err) {
+      console.error("Error:");
+      console.error(err.message);
+      res.status(500).send("Server Error!");
+    }
+  }
+);
+
+// @route put api/user/edit-username
 // @desc  Update info user
 // @access Private
 router.put(
   "/edit-:username",
-  [roles("update", "user", "loginRequired")],
+  [roles(CONSTANT.CRUD.UPDATE, CONSTANT.TASK.USER)],
   async (req, res) => {
-    let username;
-    const {
-      fullname,
-      unit,
-      phones,
-      address,
-      skills,
-      bio,
-      authorities
-    } = req.body;
-    if (!(req.params.username === "me")) {
-      if (req.user.username === "adminseameo") {
-        username = req.params.username;
-      } else if (req.user.username === req.params.username) {
-        username = req.params.username;
-      } else {
-        return res.status(401).json({
-          msg: "You do not have access adminseameo."
-        });
-      }
-    } else {
-      username = req.user.username;
-    }
+    const { fullname, unit, phones, address, skills, bio, role } = req.body;
+    const username = req.params.username.toLowerCase();
     try {
-      const user = await User.findOne({ username: username }).select(
-        "-password -__v"
-      );
+      const user = await User.findOne({ username }).select("-password -__v");
       //Build profile object
       const info = {};
       if (phones) info.phones = phones.split(",").map(phone => phone.trim());
@@ -122,11 +181,11 @@ router.put(
       if (fullname) user.fullname = fullname;
       if (unit) user.unit = unit;
       if (info) user.info = info;
-      if (authorities !== undefined) {
-        if (req.user.username === "adminseameo") user.authorities = authorities;
+      if (role !== undefined) {
+        if (req.user.role === CONSTANT.ROLES.SPADMIN) user.role = role;
         else {
           return res.status(401).json({
-            msg: "Do not change authorities. You do not have access adminseameo"
+            msg: "Do not change authorities. You do not have access superadmin"
           });
         }
       }
@@ -140,49 +199,38 @@ router.put(
   }
 );
 
-// @route put api/user/password:me or :userid
+// @route put api/user/password-username
 // @desc  Change password user
 // @access Private
 router.put(
   "/password-:username",
-  [auth, [check("newpassword", "newpassword is not Empty!").notEmpty()]],
+  [
+    roles(CONSTANT.CRUD.UPDATE, CONSTANT.TASK.USER),
+    [check("newpassword", "newpassword is not Empty!").notEmpty()]
+  ],
   async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ errors: errors.array() });
     }
     const { oldpassword, newpassword } = req.body;
-    let username;
-    if (!(req.params.username === "me")) {
-      if (req.user.username === "adminseameo") {
-        username = req.params.username;
-      } else if (req.user.username === req.params.username) {
-        username = req.params.username;
-      } else {
-        return res.status(401).json({
-          msg: "You do not have access adminseameo."
-        });
-      }
-    } else {
-      username = req.user.username;
-    }
+    const username = req.params.username.toLowerCase();
     try {
-      const user = await User.findOne({ username: username }).select(
-        "-__v -info -_id -authorities -createdate"
+      const user = await User.findOne({ username }).select(
+        "-__v -info -authorities -createdate"
       );
-      if (req.user.username === "adminseameo") {
-        if (
-          req.user.username !== req.params.username &&
-          req.params.username !== "me"
-        ) {
-          user.password = newpassword;
-        } else {
-          return res.status(401).json({
-            msg: "Cannot change adminseameo password"
-          });
+      if (req.user.role !== CONSTANT.ROLES.SPADMIN) {
+        //check Password is match
+        const isMatch = await bcrypt.compare(oldpassword, user.password);
+        if (!isMatch) {
+          return res
+            .status(400)
+            .json({ errors: [{ msg: "Invalid password credentials!" }] });
         }
-      } else {
       }
+      const salt = await bcrypt.genSalt(10);
+      user.password = await bcrypt.hash(newpassword, salt);
+      await user.save();
       res.json(user);
     } catch (err) {
       console.error("Error:");
@@ -192,34 +240,82 @@ router.put(
   }
 );
 
-// @route get api/user/:username or get api/user/me or get api/user/all
+// @route delete api/user/delete-user
+// @desc  delete user
+// @access Private
+router.delete(
+  "/username-:username",
+  [roles(CONSTANT.CRUD.DELETE, CONSTANT.TASK.USER)],
+  async (req, res) => {
+    const username = req.params.username.toLowerCase();
+    try {
+      await User.findOneAndRemove({ username });
+      res.json({ msg: `User ${username} is delete success` });
+    } catch (err) {
+      console.error("Error:");
+      console.error(err.message);
+      res.status(500).send("Server Error!");
+    }
+  }
+);
+
+// @route get api/user/username-username
 // @desc  Get current user
 // @access Private
-router.get("/:username", auth, async (req, res) => {
-  try {
-    let user;
-    if (
-      req.params.username === "me" ||
-      req.params.username === req.user.username
-    ) {
-      user = await User.findOne({
-        username: req.user.username
-      }).select("-__v -_id -createdate -password ");
-    } else if (req.params.username === "all") {
-      user = await User.find().select(
-        "-password -__v -_id -authorities -createdate"
-      );
-    } else {
-      user = await User.findOne({
-        username: req.params.username
-      }).select("-password -__v -_id -authorities -createdate");
+router.get(
+  "/username-:username",
+  roles(CONSTANT.CRUD.READ, CONSTANT.TASK.USER),
+  async (req, res) => {
+    const username = req.params.username.toLowerCase();
+    try {
+      if (req.user.role === CONSTANT.ROLES.SPADMIN)
+        user = await User.findOne({
+          username: username
+        }).select("-__v -password");
+      else if (req.user.role === CONSTANT.ROLES.ADMIN)
+        user = await User.findOne({
+          username: username
+        }).select("-__v -authorities -password -createdate");
+      else if (req.user.username === username)
+        user = await User.findOne({
+          username: username
+        }).select("-__v -authorities -password");
+      else
+        user = await User.findOne({
+          username: username
+        }).select("-__v -info -authorities -password -createdate");
+      res.json(user);
+    } catch (err) {
+      console.error("Error:");
+      console.error(err.message);
+      res.status(500).send("Server Error!");
     }
-    res.json(user);
-  } catch (err) {
-    console.error("Error:");
-    console.error(err.message);
-    res.status(500).send("Server Error!");
   }
-});
+);
+
+// @route get api/user/users
+// @desc  Get current user
+// @access Private
+router.get(
+  "/users",
+  roles(CONSTANT.CRUD.READ, CONSTANT.TASK.USER),
+  async (req, res) => {
+    try {
+      if (req.user.role === CONSTANT.ROLES.SPADMIN)
+        user = await User.find().select("-__v -password");
+      else if (req.user.role === CONSTANT.ROLES.ADMIN)
+        user = await User.find().select(
+          "-__v -authorities -password -createdate -info"
+        );
+      else if (req.user.role === CONSTANT.ROLES.USER)
+        return res.status(401).json({ errors: [{ msg: "Not have access!" }] });
+      res.json(user);
+    } catch (err) {
+      console.error("Error:");
+      console.error(err.message);
+      res.status(500).send("Server Error!");
+    }
+  }
+);
 
 module.exports = router;
